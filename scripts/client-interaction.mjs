@@ -33,6 +33,7 @@ for (const key of [
   'document',
   'navigator',
   'HTMLElement',
+  'HTMLStyleElement',
   'Element',
   'Node',
   'MouseEvent',
@@ -232,12 +233,120 @@ await act(async () => {
 })
 await settle()
 
-const menu = container.querySelector('.dsr-menu')
+// The panel is portalled into <body> (the conversation column clips its own
+// overflow, so a panel rendered inside the header subtree loses whichever side
+// it opens towards), which means its contents are queried on the document.
+const panelScope = document
+const menu = panelScope.querySelector('.dsr-menu')
 check('点击后打开面板', menu !== null)
-const rowText = [...container.querySelectorAll('.dsr-row')].map((row) => row.textContent).join(' | ')
+check(
+  '面板挂在 body 下（脱离会裁切的对话列）',
+  menu?.parentElement === document.body,
+  menu?.parentElement?.tagName ?? '(none)',
+)
+check('面板不再渲染在 React 容器内', container.querySelector('.dsr-menu') === null)
+
+// ---- viewport-aware placement -------------------------------------------------
+// The panel is measured rather than anchored: with the trigger pushed against the
+// right edge of the header (the crowded-header case), a 540px panel anchored to
+// its left edge used to hang off the window and lose its right-hand half. jsdom
+// reports every element box as 0x0, so the trigger geometry is stubbed here and
+// the placement is asserted against the numbers a real browser would produce.
+const box = (left, top, width, height) => ({
+  left, top, right: left + width, bottom: top + height, width, height, x: left, y: top,
+})
+let anchor = box(1312, 20, 60, 28)
+const stubHeader = () => {
+  trigger.getBoundingClientRect = () => anchor
+}
+const setViewport = (width, height) => {
+  for (const [key, value] of [['innerWidth', width], ['innerHeight', height]]) {
+    Object.defineProperty(window, key, { value, writable: true, configurable: true })
+  }
+}
+/** Re-run the panel's placement pass — exactly what a window resize triggers. */
+const replace = async () => {
+  await act(async () => {
+    window.dispatchEvent(new window.Event('resize'))
+  })
+  await settle(1)
+}
+/** Where the panel's left edge lands on screen, in CSS pixels. */
+const panelLeft = () => Number.parseFloat(menu.style.left)
+/** Where the panel's right edge lands on screen, in CSS pixels. */
+const panelRight = () => panelLeft() + Number.parseFloat(menu.style.width)
+
+setViewport(1400, 900)
+stubHeader()
+await replace()
+check('面板宽度取首选值', menu.style.width === '540px', menu.style.width)
+check('面板右缘对齐触发器右缘', Math.abs(panelRight() - 1372) < 0.5, `right=${panelRight()}`)
+check(
+  '面板完整落在视口内',
+  panelLeft() >= 12 && panelRight() <= 1388,
+  `left=${panelLeft()} right=${panelRight()}`,
+)
+check('面板高度上限取视口剩余空间', menu.style.maxHeight === '640px', menu.style.maxHeight)
+
+setViewport(700, 900)
+anchor = box(640, 20, 60, 28)
+stubHeader()
+await replace()
+check(
+  '窄视口：面板向左收进视口',
+  panelLeft() >= 12 && panelRight() <= 688,
+  `left=${panelLeft()} right=${panelRight()}`,
+)
+
+setViewport(480, 900)
+anchor = box(420, 20, 60, 28)
+stubHeader()
+await replace()
+check(
+  '更窄视口：面板宽度压缩到视口内',
+  panelLeft() >= 12 && panelRight() <= 468,
+  `left=${panelLeft()} right=${panelRight()}`,
+)
+
+setViewport(1400, 300)
+anchor = box(1312, 20, 60, 28)
+stubHeader()
+await replace()
+check('矮视口：高度上限跟随剩余空间', menu.style.maxHeight === '234px', menu.style.maxHeight)
+
+setViewport(1400, 900)
+anchor = box(1400, 20, 60, 28)
+stubHeader()
+await replace()
+check(
+  '触发器已越过右边界：面板仍完整可见',
+  panelLeft() >= 12 && panelRight() <= 1388,
+  `left=${panelLeft()} right=${panelRight()}`,
+)
+
+// Back to the ordinary header for the remaining assertions.
+setViewport(1400, 900)
+anchor = box(1312, 20, 60, 28)
+stubHeader()
+await replace()
+
+// The panel is no longer a DOM descendant of the trigger's root, so "clicked
+// outside?" has to consider both halves — a click inside the panel must not
+// dismiss it.
+const refreshButton = [...panelScope.querySelectorAll('.dsr-head .dsr-btn')].find(
+  (button) => button.textContent === '刷新',
+)
+check('面板头部有刷新按钮', refreshButton !== undefined)
+await act(async () => {
+  refreshButton?.dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true }))
+})
+await settle(1)
+check('点击面板内部不关闭面板', panelScope.querySelector('.dsr-menu') !== null)
+
+const rowText = [...panelScope.querySelectorAll('.dsr-row')].map((row) => row.textContent).join(' | ')
 check('列出运行中的服务', rowText.includes('shop-web'), rowText)
 check('列出已停止的服务', rowText.includes('shop-api'))
-const groupTitles = [...container.querySelectorAll('.dsr-group')].map((node) => node.textContent)
+const groupTitles = [...panelScope.querySelectorAll('.dsr-group')].map((node) => node.textContent)
 check(
   '多工作区时显示分组标题',
   groupTitles.length === 2 && groupTitles.includes('shop') && groupTitles.includes('api'),
@@ -246,14 +355,21 @@ check(
 check('显示端口', rowText.includes(':5174') && rowText.includes(':8080'))
 check('显示运行时长', /1m\d+s/.test(rowText), rowText)
 check('显示语言徽章', rowText.includes('node') && rowText.includes('java'))
-check('工作区路径可见', container.querySelector('.dsr-ws')?.textContent === WORKSPACE)
+check('工作区显示短名', panelScope.querySelector('.dsr-ws')?.textContent === 'shop',
+  panelScope.querySelector('.dsr-ws')?.textContent ?? '(none)')
+check(
+  '工作区完整路径在悬停提示里',
+  panelScope.querySelector('.dsr-ws')?.getAttribute('title') === WORKSPACE,
+  panelScope.querySelector('.dsr-ws')?.getAttribute('title') ?? '(none)',
+)
 
 // start button disabled while running, enabled while stopped
-const rows = [...container.querySelectorAll('.dsr-row')]
+const rows = [...panelScope.querySelectorAll('.dsr-row')]
 const runningRow = rows.find((row) => row.textContent.includes('shop-web'))
 const stoppedRow = rows.find((row) => row.textContent.includes('shop-api'))
+/** Row actions are icon-only, so they are looked up by their accessible name. */
 const buttonOf = (row, label) =>
-  [...row.querySelectorAll('.dsr-btn')].find((button) => button.textContent === label)
+  [...row.querySelectorAll('.dsr-icon')].find((button) => button.getAttribute('aria-label') === label)
 check('运行中：启动按钮禁用', buttonOf(runningRow, '启动')?.disabled === true)
 check('运行中：停止按钮可用', buttonOf(runningRow, '停止')?.disabled === false)
 check('已停止：启动按钮可用', buttonOf(stoppedRow, '启动')?.disabled === false)
@@ -276,21 +392,21 @@ check('点击启动调用了 action 接口', actionCall !== undefined)
 check('action 走 POST', actionCall?.method === 'POST')
 
 // expand logs
-const logButton = buttonOf(runningRow, '日志')
+const logButton = buttonOf(runningRow, '查看日志')
 await act(async () => {
   logButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
 })
 await settle()
-const log = container.querySelector('.dsr-log')
+const log = panelScope.querySelector('.dsr-log')
 check('展开日志区域', log !== null)
 check('日志内容渲染', log?.textContent.includes('VITE v8.0.14'), log?.textContent ?? '')
 check('增量游标带上了 after 参数', calls.some((entry) => /logs\?id=.*&after=/.test(entry.url)))
 
 // Log tooling: timestamps, filtering, clearing, download affordance.
-const clock = container.querySelector('.dsr-log-time')?.textContent ?? ''
+const clock = panelScope.querySelector('.dsr-log-time')?.textContent ?? ''
 check('日志行带时间戳', /^\d{2}:\d{2}:\d{2}$/.test(clock), clock || '(无)')
 
-const filterInput = container.querySelector('.dsr-log-bar .dsr-input')
+const filterInput = panelScope.querySelector('.dsr-log-bar .dsr-input')
 check('提供日志过滤输入框', filterInput !== undefined)
 if (filterInput !== null && filterInput !== undefined) {
   await act(async () => {
@@ -302,13 +418,13 @@ if (filterInput !== null && filterInput !== undefined) {
   await settle()
   check(
     '过滤生效（无匹配时给出提示）',
-    container.querySelector('.dsr-log')?.textContent.includes('没有匹配的行') === true,
-    container.querySelector('.dsr-log')?.textContent ?? '',
+    panelScope.querySelector('.dsr-log')?.textContent.includes('没有匹配的行') === true,
+    panelScope.querySelector('.dsr-log')?.textContent ?? '',
   )
 }
 
 const logBarButton = (label) =>
-  [...container.querySelectorAll('.dsr-log-bar .dsr-btn')].find((button) => button.textContent === label)
+  [...panelScope.querySelectorAll('.dsr-log-bar .dsr-btn')].find((button) => button.textContent === label)
 check('提供清空按钮', logBarButton('清空') !== undefined)
 check('提供下载按钮', logBarButton('下载') !== undefined)
 
@@ -317,15 +433,15 @@ await act(async () => {
 })
 await settle()
 check('清空调用了 /logs/clear', calls.some((entry) => entry.url.includes('/service-runner/logs/clear')))
-check('清空后本地日志为空', container.querySelector('.dsr-log')?.textContent.includes('暂无日志') === true)
+check('清空后本地日志为空', panelScope.querySelector('.dsr-log')?.textContent.includes('暂无日志') === true)
 
 // Port ownership: name the holder, and make ending it a two-step action.
 check(
   '展开后显示端口占用者',
-  container.textContent.includes('被 java（pid 3316）占用'),
-  container.querySelector('.dsr-port')?.textContent ?? '(无端口条)',
+  panelScope.body.textContent.includes('被 java（pid 3316）占用'),
+  panelScope.querySelector('.dsr-port')?.textContent ?? '(无端口条)',
 )
-const killButton = [...container.querySelectorAll('.dsr-port .dsr-btn')].find(
+const killButton = [...panelScope.querySelectorAll('.dsr-port .dsr-btn')].find(
   (button) => button.textContent === '结束该进程',
 )
 check('提供「结束该进程」按钮', killButton !== undefined)
@@ -333,7 +449,7 @@ await act(async () => {
   killButton?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
 })
 await settle()
-const confirmButton = [...container.querySelectorAll('.dsr-port .dsr-btn')].find(
+const confirmButton = [...panelScope.querySelectorAll('.dsr-port .dsr-btn')].find(
   (button) => button.textContent === '确认结束',
 )
 check('第一次点击进入二次确认', confirmButton !== undefined)
@@ -347,29 +463,29 @@ check(
 )
 
 // edit mode + detection
-const editButton = [...container.querySelectorAll('.dsr-head .dsr-btn')].find(
-  (button) => button.textContent === '编辑',
+const editButton = [...panelScope.querySelectorAll('.dsr-head .dsr-btn')].find(
+  (button) => button.textContent.includes('编辑'),
 )
 await act(async () => {
   editButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
 })
 await settle()
-const detectButton = [...container.querySelectorAll('.dsr-btn')].find(
+const detectButton = [...panelScope.querySelectorAll('.dsr-btn')].find(
   (button) => button.textContent === '探测工作区',
 )
 check('进入编辑模式', detectButton !== undefined)
-check('编辑模式列出可编辑行', container.querySelectorAll('.dsr-input').length >= 2)
+check('编辑模式列出可编辑行', panelScope.querySelectorAll('.dsr-input').length >= 2)
 
 await act(async () => {
   detectButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
 })
 await settle()
-const inputs = [...container.querySelectorAll('.dsr-input')].map((input) => input.value)
+const inputs = [...panelScope.querySelectorAll('.dsr-input')].map((input) => input.value)
 check('探测结果并入草稿', inputs.includes('shop-admin'), inputs.join(' | '))
-check('探测提示可见', container.textContent.includes('自动探测到 1 个服务'))
+check('探测提示可见', panelScope.body.textContent.includes('自动探测到 1 个服务'))
 
 // save
-const saveButton = [...container.querySelectorAll('.dsr-btn')].find(
+const saveButton = [...panelScope.querySelectorAll('.dsr-btn')].find(
   (button) => button.textContent === '保存',
 )
 await act(async () => {

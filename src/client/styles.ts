@@ -29,10 +29,27 @@ const CSS = `
 .dsr-trigger[data-open="true"] { color: var(--dsw-alias-label-primary); }
 .dsr-count { font-variant-numeric: tabular-nums; letter-spacing: -.2px; }
 
+/* The panel is portalled into <body> and position: fixed, so it is placed in
+   viewport coordinates by placeMenu (see ServiceRunnerAction.tsx); the values
+   below are only the fallback for the frame the measurement lands in.
+
+   Both halves of that are load-bearing:
+
+   - **Portal.** The trigger lives in the session header, and the conversation
+     column that holds the header clips its own overflow
+     (._0cyzDW_root[data-phase=active] { overflow: hidden }). A panel left
+     inside that subtree loses whichever side it opens towards — anchored right
+     it lost its right half off the window, anchored left it lost its left half
+     against the column edge. Only leaving the subtree escapes the clip.
+   - **No token loss.** The --dsw-* design tokens are defined on body and
+     body[data-ds-dark-theme], so a <body> child inherits them exactly as the
+     header did; dark mode included.
+   - **Fixed.** It also means the panel tracks the viewport rather than the
+     header's own box, which is what makes the clamping in placeMenu honest. */
 .dsr-menu {
-  position: absolute; top: calc(100% + 6px); left: 0; z-index: 100;
-  box-sizing: border-box; width: 540px; max-width: min(640px, 100vw - 32px);
-  max-height: min(640px, 100vh - 140px); overflow: visible;
+  position: fixed; top: 0; left: 0; z-index: 100;
+  box-sizing: border-box; width: 540px; max-width: min(640px, calc(100vw - 24px));
+  max-height: min(640px, calc(100vh - 24px)); overflow: visible;
   margin: 0; padding: 8px; list-style: none;
   display: flex; flex-direction: column; gap: 3px;
   border-radius: 14px; border: 1px solid var(--dsw-alias-border-l2, #00000014);

@@ -36,6 +36,9 @@ globalThis.window = {
     },
   },
 }
+// `installStyles` narrows its cached <style> with `instanceof HTMLStyleElement`,
+// so the stub has to expose the constructor even though it never matches.
+globalThis.HTMLStyleElement = class HTMLStyleElement {}
 globalThis.document = {
   head: {
     appendChild(node) {
@@ -98,6 +101,16 @@ check('组件是函数', typeof entry?.component === 'function')
 check('注入了样式表', styleTags.length === 1 && String(styleTags[0].textContent).includes('.dsr-menu'))
 
 // ---- render the component with real React -------------------------------------
+// The panel measures itself in a layout effect so it can never be painted at its
+// fallback position first; React points out that such an effect does nothing in a
+// server render. The browser half is never server-rendered, so that one warning
+// is noise here — everything else still surfaces.
+const reportError = console.error
+console.error = (...args) => {
+  if (String(args[0]).includes('useLayoutEffect does nothing on the server')) return
+  reportError(...args)
+}
+
 let html = ''
 try {
   html = ReactDOMServer.renderToStaticMarkup(

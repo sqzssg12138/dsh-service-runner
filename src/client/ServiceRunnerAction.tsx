@@ -9,6 +9,7 @@
  * `./components` and the pure formatters in `./format`.
  */
 import * as React from 'react'
+import { createPortal } from 'react-dom'
 
 import type {
   LogLine,
@@ -37,6 +38,36 @@ const WORKSPACE_KEY = 'dsr.workspace'
 
 /** Maximum log lines kept in the browser per service. */
 const CLIENT_LOG_LIMIT = 800
+
+/** Gutter kept between the panel and the window edges. */
+const VIEWPORT_MARGIN = 12
+
+/** Preferred panel width, matching `.dsr-menu` in the stylesheet. */
+const MENU_WIDTH = 540
+
+/** Height ceiling for the panel, matching `.dsr-menu` in the stylesheet. */
+const MENU_MAX_HEIGHT = 640
+
+/** Gap between the trigger and the panel. */
+const MENU_GAP = 6
+
+/**
+ * Measured geometry of the panel, in **viewport** coordinates.
+ *
+ * The panel is portalled into `<body>` and `position: fixed`, because the
+ * conversation column clips its own overflow: a panel rendered inside the
+ * header subtree loses whichever side it opens towards. Being outside that
+ * subtree also means the viewport is the only frame of reference left, which is
+ * exactly what `placeMenu` measures against.
+ */
+interface MenuBox {
+  /** Left edge, in viewport coordinates. */
+  left: number
+  /** Top edge, in viewport coordinates. */
+  top: number
+  width: number
+  maxHeight: number
+}
 
 export function ServiceRunnerAction(props: ActionProps): React.ReactElement {
   const sessionId = props.sessionId
@@ -79,6 +110,15 @@ export function ServiceRunnerAction(props: ActionProps): React.ReactElement {
   const [logFilter, setLogFilter] = React.useState('')
 
   const rootRef = React.useRef<HTMLDivElement | null>(null)
+  /** The trigger button; the panel is positioned from its box in the window. */
+  const triggerRef = React.useRef<HTMLButtonElement | null>(null)
+  /**
+   * The portalled panel. It is no longer a DOM descendant of `rootRef` (it lives
+   * under `<body>`), so "did the click land outside?" has to ask both.
+   */
+  const menuRef = React.useRef<HTMLDivElement | null>(null)
+  /** Measured panel geometry; `null` until the first measurement lands. */
+  const [menuBox, setMenuBox] = React.useState<MenuBox | null>(null)
   const logCursorRef = React.useRef<Record<string, number>>({})
 
   /** Services of the workspace currently in view (host returns just that one). */
@@ -156,13 +196,17 @@ export function ServiceRunnerAction(props: ActionProps): React.ReactElement {
     }
   }, [expanded])
 
-  // Click / Escape outside closes the menu, matching the shell's popovers.
+  // Click / Escape outside closes the menu, matching the shell's popovers. Both
+  // roots are consulted because the panel is portalled into <body>: it is part of
+  // this React tree but not of this DOM subtree, so a click inside it has to be
+  // recognised as inside.
   React.useEffect(() => {
     if (!open) return
     const onPointerDown = (event: MouseEvent): void => {
-      if (rootRef.current !== null && !rootRef.current.contains(event.target as Node)) {
-        setOpen(false)
-      }
+      const target = event.target as Node
+      if (rootRef.current?.contains(target) === true) return
+      if (menuRef.current?.contains(target) === true) return
+      setOpen(false)
     }
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') setOpen(false)
@@ -174,6 +218,81 @@ export function ServiceRunnerAction(props: ActionProps): React.ReactElement {
       document.removeEventListener('keydown', onKeyDown)
     }
   }, [open])
+
+  /**
+   * Decide the panel's box from where the trigger actually sits in the window.
+   *
+   * This is the whole point of measuring: the action lives at the far right of
+   * the session header, and every neighbour the header grows — breadcrumbs, the
+   * workspace chip, sibling actions, other plugins' entries — pushes it further
+   * right. A panel anchored to the trigger's *left* edge therefore ends up
+   * hundreds of pixels past the right edge of the window as soon as those
+   * neighbours get wide, and the shell shows only its left-hand slice: the
+   * header, the footer and the action buttons on each row become unreachable.
+   *
+   * So the panel opens the direction a header popover should — leftwards from
+   * the trigger's right edge — and is then clamped into the window, so neither
+   * edge can cut it off however crowded the header or narrow the window is. The
+   * height follows the same rule: the space actually left below the header wins
+   * over the stylesheet's nominal ceiling, so a short window scrolls the panel's
+   * body instead of hiding its bottom.
+   *
+   * Everything here is in viewport coordinates, which is what a portalled,
+   * `position: fixed` panel is positioned in.
+   */
+  const placeMenu = React.useCallback((): MenuBox | null => {
+    const anchor = triggerRef.current
+    if (anchor === null) return null
+    const rect = anchor.getBoundingClientRect()
+    const viewportWidth = window.innerWidth
+    const viewportHeight = window.innerHeight
+    const width = Math.min(MENU_WIDTH, Math.max(160, viewportWidth - VIEWPORT_MARGIN * 2))
+    // Right-align to the trigger first, then clamp: the outer `max` keeps the
+    // left edge on screen when the trigger itself is already past the right one.
+    const left = Math.min(
+      Math.max(rect.right - width, VIEWPORT_MARGIN),
+      Math.max(VIEWPORT_MARGIN, viewportWidth - VIEWPORT_MARGIN - width),
+    )
+    return {
+      left,
+      top: rect.bottom + MENU_GAP,
+      width,
+      maxHeight: Math.max(
+        160,
+        Math.min(MENU_MAX_HEIGHT, viewportHeight - rect.bottom - MENU_GAP - VIEWPORT_MARGIN),
+      ),
+    }
+  }, [])
+
+  // The panel is placed from measurement, so it has to be re-measured whenever
+  // the window or anything under it moves. The capture phase also catches
+  // scrolls of the conversation body rather than the window's own only.
+  React.useLayoutEffect(() => {
+    if (!open) {
+      setMenuBox(null)
+      return
+    }
+    const update = (): void => {
+      const next = placeMenu()
+      setMenuBox((previous) =>
+        previous !== null &&
+        next !== null &&
+        previous.left === next.left &&
+        previous.top === next.top &&
+        previous.width === next.width &&
+        previous.maxHeight === next.maxHeight
+          ? previous
+          : next,
+      )
+    }
+    update()
+    window.addEventListener('resize', update)
+    window.addEventListener('scroll', update, true)
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update, true)
+    }
+  }, [open, placeMenu])
 
   // Inspect a service's port when its row is expanded. The owner is what makes
   // "port already in use" actionable — an IDE debug session and a leftover dev
@@ -359,6 +478,7 @@ export function ServiceRunnerAction(props: ActionProps): React.ReactElement {
 
   const trigger = (
     <button
+      ref={triggerRef}
       type="button"
       className="dsr-trigger"
       data-open={open ? 'true' : 'false'}
@@ -377,7 +497,23 @@ export function ServiceRunnerAction(props: ActionProps): React.ReactElement {
   return (
     <div className="dsr-root" ref={rootRef}>
       {trigger}
-      <div className="dsr-menu" role="dialog" aria-label="工作区服务">
+      {/* Portalled into <body>: rendering the panel inside the header subtree
+          means the conversation column's `overflow: hidden` clips whichever
+          side it opens towards. The measured box below is the fallback for the
+          frame the measurement lands in; from then on the measured box wins. */}
+      {menuBox !== null && createPortal(
+      <div
+        className="dsr-menu"
+        ref={menuRef}
+        role="dialog"
+        aria-label="工作区服务"
+        style={{
+          left: menuBox.left,
+          top: menuBox.top,
+          width: menuBox.width,
+          maxHeight: menuBox.maxHeight,
+        }}
+      >
         <div className="dsr-head">
           <span className="dsr-ws" title={workspace ?? '未确定工作区'}>
             {workspace === null ? '未确定工作区' : workspaceLabel(workspace)}
@@ -522,7 +658,8 @@ export function ServiceRunnerAction(props: ActionProps): React.ReactElement {
             </>
           )}
         </div>
-      </div>
+      </div>,
+      document.body)}
     </div>
   )
 }

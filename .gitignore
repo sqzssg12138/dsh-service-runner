@@ -1,0 +1,21 @@
+# 依赖
+node_modules/
+
+# 构建产物：clone 后执行 `pnpm install && pnpm run build` 生成
+# （lib/index.js 是 host 半，lib/client.js 是浏览器半）
+lib/
+
+# 编辑器 / 本地工具
+.vscode/
+.idea/
+*.tsbuildinfo
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+
+# 本机专属：排障记录与补丁重放脚本，不入库
+.local-patches/

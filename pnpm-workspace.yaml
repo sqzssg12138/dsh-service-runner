@@ -1,0 +1,5 @@
+# esbuild ships its platform binary through a postinstall script, which pnpm
+# blocks by default — without this the build fails with
+# "You installed esbuild for another platform than the one you're currently using".
+allowBuilds:
+  esbuild: true
